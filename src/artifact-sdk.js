@@ -2827,8 +2827,8 @@ export function createArtifactSdk(
       if (!c) return;
 
       ignoreNextClick = true;
-      // A new selection replaces an empty card, as before, but never discards a draft: the reviewer
-      // may be copying words from the page into it.
+      // The selection by itself closes only an empty card, keeping a draft the reviewer may be
+      // copying page words into; choosing Comment replaces the card like an element click does.
       if (activeCardContext && !activeCardHasDraft()) closeCard();
       showSelectionActions(c, String(selection));
     },
