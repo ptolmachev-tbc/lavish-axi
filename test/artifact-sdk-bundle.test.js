@@ -159,6 +159,8 @@ function bootSdk({
   htmlAnnotate = null,
   platform = "Linux",
   structuralQueries = false,
+  execCommand = undefined,
+  clipboard = undefined,
 } = {}) {
   const posted = [];
   const documentListeners = [];
@@ -183,7 +185,7 @@ function bootSdk({
 
   const sandbox = {
     parent: { postMessage: (message) => posted.push(message) },
-    navigator: { platform },
+    navigator: { platform, clipboard },
     CSS: { escape: (value) => String(value) },
     Element: class Element {},
     MutationObserver: class MutationObserver {
@@ -224,6 +226,7 @@ function bootSdk({
             ? queryChildChain(documentElement, selector)
             : [],
       getSelection: () => selection,
+      execCommand,
     },
   };
   const windowListeners = [];
@@ -272,8 +275,9 @@ function bootSdk({
       listener.handler(event);
       return event;
     },
-    // Releases the mouse over `target` with `text` selected inside it, as a drag-select would.
-    selectText(target, text) {
+    // Releases the mouse over `target` with `text` selected inside it, as a drag-select would. The
+    // selection stays live afterwards, as it does in a browser, until `clearSelection`.
+    selectText(target, text, { button = 0 } = {}) {
       const textNode = { nodeType: 3, parentElement: target, parentNode: { childNodes: [] } };
       textNode.parentNode.childNodes.push(textNode);
       const range = {
@@ -287,11 +291,36 @@ function bootSdk({
         getClientRects: () => [],
         getBoundingClientRect: () => target.getBoundingClientRect(),
       };
-      selection = { rangeCount: 1, getRangeAt: () => range, toString: () => text };
+      const ranges = [range];
+      selection = {
+        get rangeCount() {
+          return ranges.length;
+        },
+        getRangeAt: (index) => ranges[index],
+        toString: () => (ranges.length ? text : ""),
+        removeAllRanges: () => ranges.splice(0, ranges.length),
+        addRange: (next) => ranges.push(next),
+      };
       const listener = documentListeners.find((entry) => entry.type === "mouseup");
       assert.ok(listener, "the SDK registers a document mouseup listener");
-      listener.handler({ target });
+      listener.handler({ target, button });
+      return range;
+    },
+    // Collapses the live selection and tells the SDK, as a click elsewhere would.
+    clearSelection() {
       selection = null;
+      for (const entry of documentListeners.filter((item) => item.type === "selectionchange")) entry.handler({});
+    },
+    pressKey(key) {
+      for (const entry of documentListeners.filter((item) => item.type === "keydown")) {
+        entry.handler({ key, preventDefault() {}, stopPropagation() {} });
+      }
+    },
+    // The Copy / Comment toolbar a finished text selection shows, if any.
+    selectionActions() {
+      return documentElement.children
+        .flatMap((child) => child.shadowRoot?.children || [])
+        .filter((child) => child.className === "lavish-selection-actions");
     },
     setDocumentQuery(query) {
       documentQuery = query;
@@ -1046,7 +1075,8 @@ test("Ctrl-click on a link after a text selection does not eat the next plain cl
   const { link } = buildLink(sdk);
   const paragraph = appendTo(sdk.body, cell("p", "Just prose"));
   sdk.selectText(paragraph, "prose");
-  assert.match(sdk.card().innerHTML, /Annotate text/, "the selection opens a text annotation card");
+  sdk.selectionActions()[0].querySelector(".lavish-selection-comment").onclick();
+  assert.match(sdk.card().innerHTML, /Annotate text/, "Comment on the selection opens a text annotation card");
 
   const followed = sdk.click(link, { ctrlKey: true });
   assert.equal(followed.defaultPrevented, false);
@@ -1320,6 +1350,7 @@ test("a text note queued inside an element does not make a click there reopen an
   sdk.selectText(other, "Second");
   // The drag-select's own click, which the SDK swallows.
   sdk.click(other);
+  sdk.selectionActions()[0].querySelector(".lavish-selection-comment").onclick();
   sdk.queue("Fix this wording");
   sdk.sendChromeMessage({ type: "lavish:queuedAnchors", selectors: [elementNote.prompt.selector] });
   const cardsBefore = sdk.cards().length;
@@ -1433,4 +1464,189 @@ test("setDocumentMeta forwards null to restore, omits unset fields and drops non
     messages.map((entry) => JSON.parse(JSON.stringify({ title: entry.title, icon: entry.icon }))),
     [{ title: null }, {}, {}],
   );
+});
+
+// A finished text selection used to open the annotation card at once, and the card's textarea took
+// focus, which emptied the selection: nothing was left for Cmd/Ctrl+C or the context menu to copy.
+// The selection now offers Copy and Comment and leaves the selection itself alone.
+function selectionButton(sdk, name) {
+  const [toolbar] = sdk.selectionActions();
+  assert.ok(toolbar, "the selection shows its Copy / Comment toolbar");
+  return toolbar.querySelector(`.lavish-selection-${name}`);
+}
+
+test("a text selection offers Copy and Comment instead of opening a card", () => {
+  const sdk = bootSdk();
+  const paragraph = appendTo(sdk.body, cell("p", "Just prose"));
+  const postedBefore = sdk.posted.length;
+
+  sdk.selectText(paragraph, "prose");
+
+  assert.equal(sdk.cards().length, 0, "no card, so no textarea takes focus from the selection");
+  const [toolbar] = sdk.selectionActions();
+  assert.ok(toolbar);
+  assert.equal(toolbar.getAttribute("role"), "toolbar");
+  assert.match(toolbar.innerHTML, />Copy</);
+  assert.match(toolbar.innerHTML, />Comment</);
+  assert.equal(sdk.posted.length, postedBefore, "showing the toolbar sends nothing to the chrome");
+  assert.equal(sdk.click(paragraph).defaultPrevented, true, "the drag-select's own click is still swallowed");
+  assert.equal(sdk.cards().length, 0, "the swallowed click opens no element card");
+});
+
+test("Comment on a selection opens the text card and queues a text-range note", () => {
+  const sdk = bootSdk();
+  const paragraph = appendTo(sdk.body, cell("p", "Just prose"));
+  sdk.selectText(paragraph, "prose");
+
+  selectionButton(sdk, "comment").onclick();
+
+  assert.equal(sdk.selectionActions().length, 0, "Comment replaces the toolbar with the card");
+  assert.match(sdk.card().innerHTML, /Annotate text/);
+  const message = sdk.queue("Say this more plainly");
+  assert.equal(message.type, "lavish:queuePrompt");
+  assert.equal(message.prompt.tag, "text");
+  assert.equal(message.prompt.target.type, "text-range");
+  assert.equal(message.prompt.target.text, "prose");
+  assert.equal(message.prompt.prompt, "Say this more plainly");
+});
+
+test("Copy copies the live selection like Cmd/Ctrl+C and confirms briefly", async () => {
+  const commands = [];
+  const sdk = bootSdk({
+    execCommand: (command) => {
+      commands.push(command);
+      return true;
+    },
+  });
+  const paragraph = appendTo(sdk.body, cell("p", "Just prose"));
+  sdk.selectText(paragraph, "prose");
+  const postedBefore = sdk.posted.length;
+  const copy = selectionButton(sdk, "copy");
+
+  copy.onclick();
+  await Promise.resolve();
+  await Promise.resolve();
+
+  assert.deepEqual(commands, ["copy"]);
+  assert.equal(copy.textContent, "Copied");
+  assert.equal(sdk.cards().length, 0, "copying opens no card");
+  assert.equal(sdk.posted.length, postedBefore, "copying queues nothing");
+  assert.equal(sdk.selectionActions().length, 1, "the toolbar stays so the reviewer can still comment");
+  sdk.runTimersOf(1500);
+  assert.equal(copy.textContent, "Copy");
+});
+
+test("Copy falls back to the Clipboard API when execCommand cannot copy", async () => {
+  const written = [];
+  const sdk = bootSdk({
+    execCommand: () => false,
+    clipboard: { writeText: async (text) => written.push(text) },
+  });
+  const paragraph = appendTo(sdk.body, cell("p", "Just prose"));
+  sdk.selectText(paragraph, "prose");
+  const copy = selectionButton(sdk, "copy");
+
+  copy.onclick();
+  await sdk.runAllTimers();
+
+  assert.deepEqual(written, ["prose"]);
+});
+
+for (const { platform, hint } of [
+  { platform: "Linux", hint: "Press Ctrl+C" },
+  { platform: "MacIntel", hint: "Press ⌘C" },
+]) {
+  test(`Copy with no clipboard access asks for the shortcut on ${platform}`, async () => {
+    const sdk = bootSdk({
+      platform,
+      execCommand: () => {
+        throw new Error("blocked");
+      },
+      clipboard: {
+        writeText: async () => {
+          throw new Error("denied");
+        },
+      },
+    });
+    const paragraph = appendTo(sdk.body, cell("p", "Just prose"));
+    sdk.selectText(paragraph, "prose");
+    const copy = selectionButton(sdk, "copy");
+
+    copy.onclick();
+    for (let tick = 0; tick < 5; tick += 1) await Promise.resolve();
+
+    assert.equal(copy.textContent, hint, "the selection is still live, so the shortcut copies it");
+    assert.equal(sdk.selectionActions().length, 1);
+  });
+}
+
+test("Copy reselects the reviewer's text when the live selection moved", async () => {
+  const sdk = bootSdk({ execCommand: () => true });
+  const paragraph = appendTo(sdk.body, cell("p", "Just prose"));
+  const range = sdk.selectText(paragraph, "prose");
+  const live = sdk.document.getSelection();
+  live.removeAllRanges();
+  live.addRange({ ...range, startOffset: 1 });
+
+  selectionButton(sdk, "copy").onclick();
+  await Promise.resolve();
+
+  assert.equal(live.getRangeAt(0), range);
+});
+
+test("the toolbar goes away when the selection collapses or Escape is pressed", () => {
+  const sdk = bootSdk();
+  const paragraph = appendTo(sdk.body, cell("p", "Just prose"));
+  sdk.selectText(paragraph, "prose");
+  sdk.clearSelection();
+  assert.equal(sdk.selectionActions().length, 0);
+
+  sdk.selectText(paragraph, "prose");
+  sdk.pressKey("Escape");
+  assert.equal(sdk.selectionActions().length, 0);
+});
+
+test("a right-click on a selection leaves it to the context menu and eats no later click", () => {
+  const sdk = bootSdk();
+  const paragraph = appendTo(sdk.body, cell("p", "Just prose"));
+
+  sdk.selectText(paragraph, "prose", { button: 2 });
+
+  assert.equal(sdk.selectionActions().length, 0);
+  assert.equal(sdk.cards().length, 0);
+  sdk.click(paragraph);
+  assert.match(sdk.card().innerHTML, /Annotate &lt;p&gt;/);
+});
+
+test("explore mode leaves a selection alone, and leaving annotate mode hides the toolbar", () => {
+  const sdk = bootSdk({ htmlAnnotate: "off" });
+  const paragraph = appendTo(sdk.body, cell("p", "Just prose"));
+  sdk.selectText(paragraph, "prose");
+  assert.equal(sdk.selectionActions().length, 0);
+
+  sdk.sendChromeMessage({ type: "lavish:setAnnotationMode", enabled: true });
+  sdk.selectText(paragraph, "prose");
+  assert.equal(sdk.selectionActions().length, 1);
+  sdk.sendChromeMessage({ type: "lavish:setAnnotationMode", enabled: false });
+  assert.equal(sdk.selectionActions().length, 0);
+});
+
+test("a new selection replaces an empty card but keeps one holding a draft", () => {
+  const sdk = bootSdk();
+  const heading = appendTo(sdk.body, cell("h1", "Headline"));
+  const paragraph = appendTo(sdk.body, cell("p", "Just prose"));
+
+  sdk.click(heading);
+  assert.notEqual(heading.style.outline, "", "the element card highlights its element");
+  sdk.selectText(paragraph, "prose");
+  // The drag-select's own click, which the SDK swallows.
+  sdk.click(paragraph);
+  assert.equal(heading.style.outline, "", "the empty card closed");
+
+  sdk.clearSelection();
+  sdk.click(heading);
+  sdk.card().querySelector("textarea").value = "Shorter, please";
+  sdk.selectText(paragraph, "prose");
+  assert.notEqual(heading.style.outline, "", "the card with a draft stays open while the reviewer copies");
+  assert.equal(sdk.selectionActions().length, 1);
 });
