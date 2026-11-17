@@ -2717,19 +2717,48 @@ export function createArtifactSdk(
   /** @type {{ marker: HTMLElement, target: Element }[]} */
   let revisionHighlights = [];
   let revisionHighlightFrame = false;
+  /** @type {ResizeObserver | null} */
+  let revisionHighlightObserver = null;
+  function visibleRevisionRect(target) {
+    const rect = target.getBoundingClientRect();
+    let left = Math.max(rect.left, 0);
+    let top = Math.max(rect.top, 0);
+    let right = Math.min(rect.right, window.innerWidth);
+    let bottom = Math.min(rect.bottom, window.innerHeight);
+    for (
+      let node = target.parentElement;
+      node && node !== document.body && node !== document.documentElement;
+      node = node.parentElement
+    ) {
+      const style = getComputedStyle(node);
+      const clipX = Boolean(style.overflowX) && style.overflowX !== "visible";
+      const clipY = Boolean(style.overflowY) && style.overflowY !== "visible";
+      if (!clipX && !clipY) continue;
+      const box = node.getBoundingClientRect();
+      if (clipX) {
+        left = Math.max(left, box.left);
+        right = Math.min(right, box.right);
+      }
+      if (clipY) {
+        top = Math.max(top, box.top);
+        bottom = Math.min(bottom, box.bottom);
+      }
+    }
+    return right > left && bottom > top ? { left, top, width: right - left, height: bottom - top } : null;
+  }
   function placeRevisionHighlights() {
     revisionHighlightFrame = false;
     const pad = 6;
-    for (const { marker, target } of revisionHighlights) {
-      const rect = target.getBoundingClientRect();
-      const visible = rect.width > 0 && rect.height > 0;
-      marker.style.display = visible ? "block" : "none";
-      if (!visible) continue;
+    const rects = revisionHighlights.map(({ target }) => visibleRevisionRect(target));
+    revisionHighlights.forEach(({ marker }, index) => {
+      const rect = rects[index];
+      marker.style.display = rect ? "block" : "none";
+      if (!rect) return;
       marker.style.left = rect.left - pad + "px";
       marker.style.top = rect.top - pad + "px";
       marker.style.width = rect.width + pad * 2 + "px";
       marker.style.height = rect.height + pad * 2 + "px";
-    }
+    });
   }
   function scheduleRevisionHighlightPlacement() {
     if (revisionHighlights.length === 0 || revisionHighlightFrame) return;
@@ -2738,6 +2767,7 @@ export function createArtifactSdk(
   }
   document.addEventListener("scroll", scheduleRevisionHighlightPlacement, { capture: true, passive: true });
   window.addEventListener("resize", scheduleRevisionHighlightPlacement, { passive: true });
+  window.addEventListener("load", scheduleRevisionHighlightPlacement);
   // The tag sits on the swatch colour, so pick whichever ink reads better on it: the palette
   // mixes dark blues with light ambers, and neither white nor near-black suits all of them.
   function revisionTagInk(hex) {
@@ -2751,6 +2781,8 @@ export function createArtifactSdk(
   function highlightRevision(msg) {
     for (const { marker } of revisionHighlights) marker.remove();
     revisionHighlights = [];
+    revisionHighlightObserver?.disconnect();
+    revisionHighlightObserver = null;
     const selectors = Array.isArray(msg && msg.selectors) ? msg.selectors.slice(0, 200) : [];
     if (selectors.length === 0) return;
     const color = /^#[0-9a-fA-F]{6}$/.test(String(msg.color)) ? String(msg.color) : "#f4c95d";
@@ -2774,6 +2806,11 @@ export function createArtifactSdk(
       marker.appendChild(tag);
       root.appendChild(marker);
       revisionHighlights.push({ marker, target });
+    }
+    if (revisionHighlights.length > 0 && typeof ResizeObserver !== "undefined") {
+      revisionHighlightObserver = new ResizeObserver(scheduleRevisionHighlightPlacement);
+      revisionHighlightObserver.observe(document.documentElement);
+      for (const { target } of revisionHighlights) revisionHighlightObserver.observe(target);
     }
     placeRevisionHighlights();
   }
