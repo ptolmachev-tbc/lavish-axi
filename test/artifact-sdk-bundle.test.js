@@ -368,6 +368,14 @@ function bootSdk({
         .flatMap((child) => child.shadowRoot?.children || [])
         .filter((child) => child.className === "lavish-reveal-marker");
     },
+    shadowChildren() {
+      return documentElement.children.flatMap((child) => child.shadowRoot?.children || []);
+    },
+    // Fires every document listener of `type`, as a scroll anywhere in the page would (the SDK
+    // listens in the capture phase so nested scroll containers reach it too).
+    dispatchDocument(type, event) {
+      for (const entry of documentListeners.filter((item) => item.type === type)) entry.handler(event);
+    },
     // The chrome is the only legitimate sender, so its messages arrive with `source: parent`.
     sendChromeMessage(data) {
       const listeners = windowListeners.filter((entry) => entry.type === "message");
@@ -499,6 +507,77 @@ test("a reveal marker stops tracking once it is removed or replaced", () => {
   sdk.runFrames();
   sdk.runFrames();
   assert.equal(scroll.reads, readsAtRemoval, "no frame re-reads the target after the marker is gone");
+});
+
+// The newest round's outline stays on the page (unlike the reveal flash), so it has to follow its
+// block through scrolling and be replaced wholesale by the next round's message.
+function bootHighlightTargets() {
+  const sdk = bootSdk({ runAnimationFrames: true });
+  const rects = {
+    "#new-a": { left: 40, top: 100, right: 640, bottom: 220, width: 600, height: 120 },
+    "#new-b": { left: 40, top: 400, right: 640, bottom: 460, width: 600, height: 60 },
+  };
+  const targets = {};
+  for (const selector of Object.keys(rects)) {
+    const target = sdk.asElement(appendTo(sdk.body, cell("section", selector)));
+    target.getBoundingClientRect = () => rects[selector];
+    targets[selector] = target;
+  }
+  sdk.setDocumentQuery((selector) => targets[selector] || null);
+  return { sdk, rects };
+}
+
+function highlightMarkers(sdk) {
+  return sdk.shadowChildren().filter((child) => child.className === "lavish-revision-highlight");
+}
+
+const HIGHLIGHT_MESSAGE = {
+  type: "lavish:highlightRevision",
+  selectors: ["#new-a", "#new-b", "#missing"],
+  label: "Round 2",
+  color: "#d55e00",
+  borderStyle: "dashed",
+};
+
+test("the newest round is outlined block by block, skipping selectors that resolve to nothing", () => {
+  const { sdk } = bootHighlightTargets();
+  sdk.sendChromeMessage(HIGHLIGHT_MESSAGE);
+
+  const markers = highlightMarkers(sdk);
+  assert.equal(markers.length, 2);
+  assert.deepEqual(
+    { left: markers[0].style.left, top: markers[0].style.top, width: markers[0].style.width },
+    { left: "34px", top: "94px", width: "612px" },
+    "the outline sits a few pixels outside its block so it never covers the content",
+  );
+  assert.equal(markers[0].style.borderColor, "#d55e00");
+  assert.equal(markers[0].style.borderStyle, "dashed");
+  assert.equal(markers[0].children[0].textContent, "Updated · Round 2");
+});
+
+test("an outline follows its block on scroll and is replaced or cleared by the next message", () => {
+  const { sdk, rects } = bootHighlightTargets();
+  sdk.sendChromeMessage(HIGHLIGHT_MESSAGE);
+
+  rects["#new-a"] = { ...rects["#new-a"], top: 20, bottom: 140 };
+  sdk.dispatchDocument("scroll", {});
+  sdk.runFrames();
+  assert.equal(highlightMarkers(sdk)[0].style.top, "14px");
+
+  sdk.sendChromeMessage({ ...HIGHLIGHT_MESSAGE, selectors: ["#new-b"] });
+  assert.equal(highlightMarkers(sdk).length, 1, "a new round replaces the old outlines at once");
+
+  sdk.sendChromeMessage({ ...HIGHLIGHT_MESSAGE, selectors: [] });
+  assert.equal(highlightMarkers(sdk).length, 0);
+});
+
+test("an outline refuses a colour or border style outside the palette's shape", () => {
+  const { sdk } = bootHighlightTargets();
+  sdk.sendChromeMessage({ ...HIGHLIGHT_MESSAGE, color: "red; background: url(x)", borderStyle: "groove" });
+
+  const marker = highlightMarkers(sdk)[0];
+  assert.notEqual(marker.style.borderColor, "red; background: url(x)");
+  assert.equal(marker.style.borderStyle, "solid");
 });
 
 function buildTable(sdk) {

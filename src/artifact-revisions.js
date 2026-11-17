@@ -134,21 +134,26 @@ export function parseRevisionRegistry(doc) {
   }
   if (!Array.isArray(parsed)) return [];
 
-  const revisions = [];
+  const accepted = [];
   // A Set, not an object: `__proto__` is a legal revision id, and assigning it
   // as a plain-object key never becomes an own property, so duplicates of it
   // would slip past the check below.
   const seen = new Set();
   let examined = 0;
   for (const raw of parsed) {
-    if (examined >= limits.rawEntries || revisions.length >= limits.entries) break;
+    if (examined >= limits.rawEntries) break;
     examined += 1;
-    const entry = normalizeRevisionEntry(raw, revisions.length);
+    const entry = normalizeRevisionEntry(raw, 0);
     if (!entry || seen.has(entry.id)) continue;
     seen.add(entry.id);
-    revisions.push(entry);
+    accepted.push(entry);
   }
-  return revisions;
+  // The registry is oldest first, and the legend shows only as many rounds as
+  // its palette can tell apart. Keep the newest ones: the round the reviewer
+  // just asked for is the one they need to find, and the newest-round outline
+  // reads the last entry. Index is the position in the legend, so the kept
+  // rounds still get distinct swatches.
+  return accepted.slice(-limits.entries).map((entry, index) => ({ ...entry, index }));
 }
 
 // Generated HTML repeats ids more often than anyone would like, and `#id`
