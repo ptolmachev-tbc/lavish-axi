@@ -188,6 +188,23 @@ test("the registry yields at most the number of rows the legend can distinguish"
   assert.equal(parseRevisionRegistry(doc({ registry: registryJson(entries) })).length, limits.entries);
 });
 
+// Regression: a long review kept its first six rounds and dropped every later one, so the
+// round the reviewer had just asked for never reached the legend or the newest-round outline.
+test("a registry longer than the legend keeps its newest rounds, indexed by legend position", () => {
+  const limits = revisionLimits();
+  const entries = Array.from({ length: limits.entries + 4 }, (_, index) => ({ id: `r${index}` }));
+  const revisions = parseRevisionRegistry(doc({ registry: registryJson(entries) }));
+
+  assert.deepEqual(
+    revisions.map((revision) => revision.id),
+    entries.slice(-limits.entries).map((entry) => entry.id),
+  );
+  assert.deepEqual(
+    revisions.map((revision) => revision.index),
+    Array.from({ length: limits.entries }, (_, index) => index),
+  );
+});
+
 test("marks stop at the cap so one artifact cannot flood the legend", () => {
   const limits = revisionLimits();
   const marks = collectRevisionMarks(doc({ marked: Array.from({ length: limits.marks + 50 }, () => marked("r1")) }), [

@@ -8657,6 +8657,117 @@ test("a mark naming an undeclared revision never reaches the legend", async () =
   assert.equal(chrome.element("revisionsSummary").textContent, "1 revision · 0 marked blocks");
 });
 
+// The newest round is outlined on load, so a reviewer coming back to a long artifact sees what
+// changed without opening the legend. Older rounds stay reachable through Reveal only.
+function highlightMessages(chrome) {
+  return chrome.postedToFrame.filter((message) => message.type === "lavish:highlightRevision");
+}
+
+// The client runs in its own realm, so copy its array before comparing it structurally.
+function lastHighlightSelectors(chrome) {
+  return [...highlightMessages(chrome).at(-1).selectors];
+}
+
+const TWO_ROUND_REVISIONS = {
+  revisions: [
+    { id: "r1", label: "Round 1" },
+    { id: "r2", label: "Round 2" },
+  ],
+  marks: [
+    { revision_id: "r1", selector: "#old", tag: "p", excerpt: "old" },
+    { revision_id: "r2", selector: "#new-a", tag: "section", excerpt: "a" },
+    { revision_id: "r2", selector: "#new-b", tag: "section", excerpt: "b" },
+  ],
+};
+
+test("the newest round's blocks are outlined by default, in that round's swatch", async () => {
+  const chrome = await revisionHarness();
+
+  sendRevisions(chrome, TWO_ROUND_REVISIONS);
+
+  assert.deepEqual(JSON.parse(JSON.stringify(highlightMessages(chrome).at(-1))), {
+    type: "lavish:highlightRevision",
+    selectors: ["#new-a", "#new-b"],
+    label: "Round 2",
+    color: "#d55e00",
+    borderStyle: "dashed",
+  });
+  assert.equal(chrome.element("revisionsHighlight").checked, true);
+});
+
+test("turning the outline off clears it, survives a reload, and turning it on restores it", async () => {
+  const localStore = new Map();
+  const options = { sessionData: { ...defaultSessionData, revisionPalette: REVISION_PALETTE_FIXTURE }, localStore };
+  const chrome = await createChromeHarness(options);
+  sendRevisions(chrome, TWO_ROUND_REVISIONS);
+
+  chrome.element("revisionsHighlight").checked = false;
+  chrome.element("revisionsHighlight").onchange();
+  assert.deepEqual(lastHighlightSelectors(chrome), []);
+  assert.equal(localStore.get("lavish-axi:revision-highlight"), "off");
+
+  const reloaded = await createChromeHarness(options);
+  sendRevisions(reloaded, TWO_ROUND_REVISIONS);
+  assert.deepEqual(lastHighlightSelectors(reloaded), [], "the preference outlives the page");
+  assert.equal(reloaded.element("revisionsHighlight").checked, false);
+
+  reloaded.element("revisionsHighlight").checked = true;
+  reloaded.element("revisionsHighlight").onchange();
+  assert.deepEqual(lastHighlightSelectors(reloaded), ["#new-a", "#new-b"]);
+  assert.equal(localStore.has("lavish-axi:revision-highlight"), false);
+});
+
+test("a reload without the registry, or a newest round with no marks, clears the outline", async () => {
+  const chrome = await revisionHarness();
+  sendRevisions(chrome, TWO_ROUND_REVISIONS);
+
+  sendRevisions(chrome, {
+    revisions: [...TWO_ROUND_REVISIONS.revisions, { id: "r3", label: "Round 3" }],
+    marks: TWO_ROUND_REVISIONS.marks,
+  });
+  assert.deepEqual(lastHighlightSelectors(chrome), [], "an unmarked newest round outlines nothing");
+
+  sendRevisions(chrome, TWO_ROUND_REVISIONS);
+  sendRevisions(chrome, { revisions: [], marks: [] });
+  assert.deepEqual(lastHighlightSelectors(chrome), []);
+});
+
+// Regression: the legend kept the first rounds once a review outgrew the palette, so the outline
+// stayed on an old round while the round the reviewer had just asked for went unmarked.
+test("past the legend's capacity the outline still follows the newest round", async () => {
+  const chrome = await revisionHarness();
+  sendRevisions(chrome, {
+    revisions: [
+      { id: "r1", label: "Round 1" },
+      { id: "r2", label: "Round 2" },
+      { id: "r3", label: "Round 3" },
+    ],
+    marks: [
+      { revision_id: "r2", selector: "#two", tag: "p", excerpt: "two" },
+      { revision_id: "r3", selector: "#three", tag: "p", excerpt: "three" },
+    ],
+  });
+
+  assert.deepEqual(lastHighlightSelectors(chrome), ["#three"]);
+  assert.deepEqual(
+    revisionRows(chrome).map((row) => row.querySelectorAll(".revision-label")[0].textContent),
+    ["Round 2", "Round 3"],
+  );
+});
+
+test("blocked storage keeps the outline on and the toggle still works for the page", async () => {
+  const chrome = await createChromeHarness({
+    sessionData: { ...defaultSessionData, revisionPalette: REVISION_PALETTE_FIXTURE },
+    localStorageThrows: true,
+  });
+  sendRevisions(chrome, TWO_ROUND_REVISIONS);
+  assert.deepEqual(lastHighlightSelectors(chrome), ["#new-a", "#new-b"]);
+
+  chrome.element("revisionsHighlight").checked = false;
+  chrome.element("revisionsHighlight").onchange();
+  assert.deepEqual(lastHighlightSelectors(chrome), []);
+});
+
 // A node inside the queued log, as the log's delegated listeners see it: `closest` answers for
 // the classes of the bubble part the test names, carrying that bubble's index.
 function queuedLogNode(classes, index, props = {}) {

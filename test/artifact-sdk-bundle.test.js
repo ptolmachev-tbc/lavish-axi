@@ -173,6 +173,8 @@ function bootSdk({
   };
   /** @type {(selector: string) => any} */
   let documentQuery = () => null;
+  const resizeObservers = new Set();
+  const computedStyles = new Map();
   /** @type {any} */
   let selection = null;
   const documentElement = createElement("html");
@@ -193,8 +195,18 @@ function bootSdk({
       disconnect() {}
     },
     ResizeObserver: class ResizeObserver {
-      observe() {}
-      disconnect() {}
+      constructor(callback) {
+        this.callback = callback;
+        this.observed = new Set();
+        resizeObservers.add(this);
+      }
+      observe(target) {
+        this.observed.add(target);
+      }
+      disconnect() {
+        this.observed.clear();
+        resizeObservers.delete(this);
+      }
     },
     URL: {
       createObjectURL() {
@@ -202,7 +214,7 @@ function bootSdk({
       },
       revokeObjectURL() {},
     },
-    getComputedStyle: () => ({}),
+    getComputedStyle: (element) => computedStyles.get(element) || {},
     setTimeout: scheduleTimer,
     clearTimeout: cancelTimer,
     requestAnimationFrame: (fn) => (runAnimationFrames ? scheduleTimer(fn, 0) : 0),
@@ -325,6 +337,19 @@ function bootSdk({
     setDocumentQuery(query) {
       documentQuery = query;
     },
+    setComputedStyle(element, style) {
+      computedStyles.set(element, style);
+    },
+    // Reports a size change of `element` to every live ResizeObserver watching it, as a late image,
+    // font, or the artifact's own script would.
+    resize(element) {
+      for (const observer of [...resizeObservers]) {
+        if (observer.observed.has(element)) observer.callback([]);
+      }
+    },
+    dispatchWindow(type, event = {}) {
+      for (const entry of windowListeners.filter((item) => item.type === type)) entry.handler(event);
+    },
     runTimers() {
       const pending = timers.splice(0, timers.length);
       for (const timer of pending) {
@@ -367,6 +392,14 @@ function bootSdk({
       return documentElement.children
         .flatMap((child) => child.shadowRoot?.children || [])
         .filter((child) => child.className === "lavish-reveal-marker");
+    },
+    shadowChildren() {
+      return documentElement.children.flatMap((child) => child.shadowRoot?.children || []);
+    },
+    // Fires every document listener of `type`, as a scroll anywhere in the page would (the SDK
+    // listens in the capture phase so nested scroll containers reach it too).
+    dispatchDocument(type, event) {
+      for (const entry of documentListeners.filter((item) => item.type === type)) entry.handler(event);
     },
     // The chrome is the only legitimate sender, so its messages arrive with `source: parent`.
     sendChromeMessage(data) {
@@ -499,6 +532,122 @@ test("a reveal marker stops tracking once it is removed or replaced", () => {
   sdk.runFrames();
   sdk.runFrames();
   assert.equal(scroll.reads, readsAtRemoval, "no frame re-reads the target after the marker is gone");
+});
+
+// The newest round's outline stays on the page (unlike the reveal flash), so it has to follow its
+// block through scrolling and be replaced wholesale by the next round's message.
+function bootHighlightTargets() {
+  const sdk = bootSdk({ runAnimationFrames: true });
+  const rects = {
+    "#new-a": { left: 40, top: 100, right: 640, bottom: 220, width: 600, height: 120 },
+    "#new-b": { left: 40, top: 400, right: 640, bottom: 460, width: 600, height: 60 },
+  };
+  const targets = {};
+  for (const selector of Object.keys(rects)) {
+    const target = sdk.asElement(appendTo(sdk.body, cell("section", selector)));
+    target.getBoundingClientRect = () => rects[selector];
+    targets[selector] = target;
+  }
+  sdk.setDocumentQuery((selector) => targets[selector] || null);
+  return { sdk, rects };
+}
+
+function highlightMarkers(sdk) {
+  return sdk.shadowChildren().filter((child) => child.className === "lavish-revision-highlight");
+}
+
+const HIGHLIGHT_MESSAGE = {
+  type: "lavish:highlightRevision",
+  selectors: ["#new-a", "#new-b", "#missing"],
+  label: "Round 2",
+  color: "#d55e00",
+  borderStyle: "dashed",
+};
+
+test("the newest round is outlined block by block, skipping selectors that resolve to nothing", () => {
+  const { sdk } = bootHighlightTargets();
+  sdk.sendChromeMessage(HIGHLIGHT_MESSAGE);
+
+  const markers = highlightMarkers(sdk);
+  assert.equal(markers.length, 2);
+  assert.deepEqual(
+    { left: markers[0].style.left, top: markers[0].style.top, width: markers[0].style.width },
+    { left: "34px", top: "94px", width: "612px" },
+    "the outline sits a few pixels outside its block so it never covers the content",
+  );
+  assert.equal(markers[0].style.borderColor, "#d55e00");
+  assert.equal(markers[0].style.borderStyle, "dashed");
+  assert.equal(markers[0].children[0].textContent, "Updated · Round 2");
+});
+
+test("an outline follows its block on scroll and is replaced or cleared by the next message", () => {
+  const { sdk, rects } = bootHighlightTargets();
+  sdk.sendChromeMessage(HIGHLIGHT_MESSAGE);
+
+  rects["#new-a"] = { ...rects["#new-a"], top: 20, bottom: 140 };
+  sdk.dispatchDocument("scroll", {});
+  sdk.runFrames();
+  assert.equal(highlightMarkers(sdk)[0].style.top, "14px");
+
+  sdk.sendChromeMessage({ ...HIGHLIGHT_MESSAGE, selectors: ["#new-b"] });
+  assert.equal(highlightMarkers(sdk).length, 1, "a new round replaces the old outlines at once");
+
+  sdk.sendChromeMessage({ ...HIGHLIGHT_MESSAGE, selectors: [] });
+  assert.equal(highlightMarkers(sdk).length, 0);
+});
+
+test("an outline follows a layout shift that no scroll or resize announces", () => {
+  const { sdk, rects } = bootHighlightTargets();
+  sdk.sendChromeMessage(HIGHLIGHT_MESSAGE);
+
+  // A late image above the block grows the document and pushes the block down.
+  rects["#new-a"] = { ...rects["#new-a"], top: 300, bottom: 420 };
+  sdk.resize(sdk.document.documentElement);
+  sdk.runFrames();
+  assert.equal(highlightMarkers(sdk)[0].style.top, "294px");
+
+  rects["#new-a"] = { ...rects["#new-a"], top: 340, bottom: 460 };
+  sdk.dispatchWindow("load");
+  sdk.runFrames();
+  assert.equal(highlightMarkers(sdk)[0].style.top, "334px", "the window load re-places the outline too");
+});
+
+test("an outline hides when its block is scrolled out of an overflow container and clips to it otherwise", () => {
+  const sdk = bootSdk({ runAnimationFrames: true });
+  const panel = appendTo(sdk.body, cell("div", "panel"));
+  panel.getBoundingClientRect = () => ({ left: 0, top: 100, right: 400, bottom: 300, width: 400, height: 200 });
+  sdk.setComputedStyle(panel, { overflowX: "hidden", overflowY: "auto" });
+  let rowRect = { left: 20, top: 120, right: 380, bottom: 160, width: 360, height: 40 };
+  const row = sdk.asElement(appendTo(panel, cell("div", "row")));
+  row.getBoundingClientRect = () => rowRect;
+  sdk.setDocumentQuery((selector) => (selector === "#row" ? row : null));
+  sdk.sendChromeMessage({ ...HIGHLIGHT_MESSAGE, selectors: ["#row"] });
+  const marker = highlightMarkers(sdk)[0];
+  assert.equal(marker.style.display, "block");
+
+  // The panel scrolls the row above its top edge: it is still inside the viewport, but hidden.
+  rowRect = { left: 20, top: 40, right: 380, bottom: 80, width: 360, height: 40 };
+  sdk.dispatchDocument("scroll", {});
+  sdk.runFrames();
+  assert.equal(marker.style.display, "none", "an outline is never drawn over content outside its container");
+
+  // Half scrolled out: the outline covers only the part the panel still shows.
+  rowRect = { left: 20, top: 80, right: 380, bottom: 120, width: 360, height: 40 };
+  sdk.dispatchDocument("scroll", {});
+  sdk.runFrames();
+  assert.deepEqual(
+    { display: marker.style.display, top: marker.style.top, height: marker.style.height },
+    { display: "block", top: "94px", height: "32px" },
+  );
+});
+
+test("an outline refuses a colour or border style outside the palette's shape", () => {
+  const { sdk } = bootHighlightTargets();
+  sdk.sendChromeMessage({ ...HIGHLIGHT_MESSAGE, color: "red; background: url(x)", borderStyle: "groove" });
+
+  const marker = highlightMarkers(sdk)[0];
+  assert.notEqual(marker.style.borderColor, "red; background: url(x)");
+  assert.equal(marker.style.borderStyle, "solid");
 });
 
 function buildTable(sdk) {

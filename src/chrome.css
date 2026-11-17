@@ -749,6 +749,21 @@ body.lavish {
   color: var(--fg-faint);
 }
 
+.revisions-highlight {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 8px;
+  font-size: 11px;
+  color: var(--fg);
+  cursor: pointer;
+}
+
+.revisions-highlight input {
+  margin: 0;
+  accent-color: var(--accent);
+}
+
 .revisions-list {
   max-height: 320px;
   overflow-y: auto;

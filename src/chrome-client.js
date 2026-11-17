@@ -186,6 +186,7 @@ const revisionsCount = /** @type {HTMLSpanElement} */ (document.getElementById("
 const revisionsDrawer = /** @type {HTMLDivElement} */ (document.getElementById("revisionsDrawer"));
 const revisionsSummary = /** @type {HTMLParagraphElement} */ (document.getElementById("revisionsSummary"));
 const revisionsList = /** @type {HTMLDivElement} */ (document.getElementById("revisionsList"));
+const revisionsHighlight = /** @type {HTMLInputElement} */ (document.getElementById("revisionsHighlight"));
 const sendHint = /** @type {HTMLDivElement} */ (document.getElementById("sendHint"));
 const whiteboardOverlay = /** @type {HTMLDivElement} */ (document.getElementById("whiteboardOverlay"));
 const whiteboardFrame = /** @type {HTMLIFrameElement} */ (document.getElementById("whiteboardFrame"));
@@ -2899,15 +2900,23 @@ function revisionPresentation(index) {
 // textContent. Nothing the message carries reaches a style property.
 function normalizeRevisionMessage(msg) {
   const rawRevisions = Array.isArray(msg && msg.revisions) ? msg.revisions : [];
-  const revisions = [];
-  const byId = new Map();
+  const accepted = [];
+  const seen = new Set();
   let examined = 0;
   for (const raw of rawRevisions) {
-    if (examined >= REVISION_LIMITS.rawEntries || revisions.length >= REVISION_LIMITS.entries) break;
+    if (examined >= REVISION_LIMITS.rawEntries) break;
     examined += 1;
     if (!raw || typeof raw !== "object") continue;
     const id = revisionExact(raw.id, REVISION_LIMITS.id);
-    if (!id || /\s/.test(id) || byId.has(id)) continue;
+    if (!id || /\s/.test(id) || seen.has(id)) continue;
+    seen.add(id);
+    accepted.push({ id, raw });
+  }
+  // Keep the newest rounds, mirroring `parseRevisionRegistry`: the round the reviewer just
+  // asked for must stay in the legend and is the one the newest-round outline shows.
+  const revisions = [];
+  const byId = new Map();
+  for (const { id, raw } of accepted.slice(-REVISION_LIMITS.entries)) {
     const entry = {
       id,
       label: revisionText(raw.label, REVISION_LIMITS.label) || id,
@@ -2959,6 +2968,53 @@ function applyRevisionMessage(msg) {
     if (!revisionEntries.some((entry) => entry.id === id)) revisionRevealCursor.delete(id);
   }
   renderRevisionLegend();
+  syncRevisionHighlight();
+}
+
+// ---- Newest-round outline ----
+// The newest declared revision is outlined on every artifact load, so a reviewer coming back
+// to a long artifact sees what changed instead of rereading it. It is a per-viewer preference,
+// on unless turned off, kept in localStorage under one key for every session (like the panel
+// collapse). The SDK draws it in its shadow overlay; the artifact itself is never restyled.
+const revisionHighlightStorageKey = "lavish-axi:revision-highlight";
+let revisionHighlightEnabled = readRevisionHighlightEnabled();
+if (revisionsHighlight) {
+  revisionsHighlight.checked = revisionHighlightEnabled;
+  revisionsHighlight.onchange = () => setRevisionHighlightEnabled(revisionsHighlight.checked);
+}
+
+function readRevisionHighlightEnabled() {
+  try {
+    return localStorage.getItem(revisionHighlightStorageKey) !== "off";
+  } catch {
+    return true;
+  }
+}
+
+function setRevisionHighlightEnabled(enabled) {
+  revisionHighlightEnabled = Boolean(enabled);
+  try {
+    if (revisionHighlightEnabled) localStorage.removeItem(revisionHighlightStorageKey);
+    else localStorage.setItem(revisionHighlightStorageKey, "off");
+  } catch {
+    // Storage refused only means the preference does not survive a reload.
+  }
+  syncRevisionHighlight();
+}
+
+function syncRevisionHighlight() {
+  const newest = revisionEntries.at(-1);
+  const selectors =
+    revisionHighlightEnabled && newest
+      ? revisionMarks.filter((mark) => mark.revisionId === newest.id).map((mark) => mark.selector)
+      : [];
+  postToFrame({
+    type: "lavish:highlightRevision",
+    selectors,
+    label: newest ? newest.label : "",
+    color: newest ? newest.color : "",
+    borderStyle: newest ? newest.borderStyle : "",
+  });
 }
 
 function revisionMarkSummary(entry) {
