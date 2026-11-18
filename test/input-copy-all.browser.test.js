@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { spawn, spawnSync } from "node:child_process";
+import { spawnSync } from "node:child_process";
 import { access, mkdtemp, rm } from "node:fs/promises";
 import http from "node:http";
 import os from "node:os";
@@ -8,6 +8,8 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import test from "node:test";
 
 import { parse } from "parse5";
+
+import { dumpChromeDom } from "./helpers/headless-chrome.js";
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const playbooksPath = process.env.LAVISH_AXI_PLAYBOOKS_MODULE || path.join(repoRoot, "src/playbooks.js");
@@ -142,43 +144,6 @@ function probeScript(scenario, { clicks = 1 } = {}) {
   </script>`;
 }
 
-function dumpChromeDom(chrome, args, timeoutMs) {
-  return new Promise((resolve, reject) => {
-    const child = spawn(chrome, args, { detached: true, stdio: ["ignore", "pipe", "ignore"] });
-    let stdout = "";
-    let settled = false;
-    const stop = () => {
-      try {
-        process.kill(-child.pid, "SIGKILL");
-      } catch {
-        child.kill("SIGKILL");
-      }
-    };
-    const finish = (error) => {
-      if (settled) return;
-      settled = true;
-      clearTimeout(timer);
-      stop();
-      if (error) reject(error);
-      else resolve(stdout);
-    };
-    const timer = setTimeout(() => finish(new Error("Chrome did not dump the fixture DOM in time")), timeoutMs);
-    child.on("error", finish);
-    child.on("exit", (code) => {
-      if (!settled) finish(new Error(`Chrome exited before dumping the fixture DOM (${code})`));
-    });
-    child.stdout.setEncoding("utf8");
-    child.stdout.on("data", (chunk) => {
-      stdout += chunk;
-      if (stdout.length > 2 * 1024 * 1024) {
-        finish(new Error("Chrome fixture DOM exceeded 2 MB"));
-      } else if (stdout.includes("</html>")) {
-        finish();
-      }
-    });
-  });
-}
-
 function resultFromDump(html) {
   const document = parse(html);
   const stack = /** @type {import("parse5").DefaultTreeAdapterMap["node"][]} */ ([document]);
@@ -239,7 +204,7 @@ async function runBrowserScenario(t, scenario, fixture, options = {}) {
         "--dump-dom",
         `http://127.0.0.1:${address.port}/`,
       ],
-      30_000,
+      { timeoutMs: 30_000, maxBytes: 2 * 1024 * 1024 },
     );
     const result = resultFromDump(stdout);
     assert.ok(result, "browser fixture did not report a result");
