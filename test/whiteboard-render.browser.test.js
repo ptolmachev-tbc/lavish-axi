@@ -1,5 +1,4 @@
 import assert from "node:assert/strict";
-import { spawn } from "node:child_process";
 import { access, cp, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import http from "node:http";
 import os from "node:os";
@@ -9,6 +8,8 @@ import test from "node:test";
 
 import * as esbuild from "esbuild";
 import { parse } from "parse5";
+
+import { dumpChromeDom } from "./helpers/headless-chrome.js";
 
 const projectRoot = fileURLToPath(new URL("..", import.meta.url));
 
@@ -38,43 +39,6 @@ function contentType(file) {
   if (file.endsWith(".css")) return "text/css; charset=utf-8";
   if (file.endsWith(".woff2")) return "font/woff2";
   return "application/octet-stream";
-}
-
-function dumpChromeDom(chrome, args, timeoutMs) {
-  return new Promise((resolve, reject) => {
-    const child = spawn(chrome, args, { detached: true, stdio: ["ignore", "pipe", "ignore"] });
-    let stdout = "";
-    let settled = false;
-    const stop = () => {
-      try {
-        process.kill(-child.pid, "SIGKILL");
-      } catch {
-        child.kill("SIGKILL");
-      }
-    };
-    const finish = (error) => {
-      if (settled) return;
-      settled = true;
-      clearTimeout(timer);
-      stop();
-      if (error) reject(error);
-      else resolve(stdout);
-    };
-    const timer = setTimeout(() => finish(new Error("Chrome did not dump the fixture DOM in time")), timeoutMs);
-    child.on("error", finish);
-    child.on("exit", (code) => {
-      if (!settled) finish(new Error(`Chrome exited before dumping the fixture DOM (${code})`));
-    });
-    child.stdout.setEncoding("utf8");
-    child.stdout.on("data", (chunk) => {
-      stdout += chunk;
-      if (stdout.length > 8 * 1024 * 1024) {
-        finish(new Error("Chrome fixture DOM exceeded 8 MB"));
-      } else if (stdout.includes("</html>")) {
-        finish();
-      }
-    });
-  });
 }
 
 function resultFromDump(html) {
@@ -165,7 +129,7 @@ async function runBrowserFixture(t, fixtureName) {
           "--dump-dom",
           `http://127.0.0.1:${address.port}/`,
         ],
-        75_000,
+        { timeoutMs: 75_000, maxBytes: 8 * 1024 * 1024 },
       );
       const result = resultFromDump(stdout);
       assert.ok(result, "browser fixture did not report a result");
