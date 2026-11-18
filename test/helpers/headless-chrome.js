@@ -14,10 +14,21 @@ function processGroupAlive(pgid) {
 // A caller that removes the profile during that window fails with ENOTEMPTY,
 // so settle only once every process in Chrome's group is gone.
 async function waitForProcessGroupExit(pgid, exited, timeoutMs) {
-  await exited;
   const deadline = Date.now() + timeoutMs;
+  const timedOut = () => new Error(`Chrome process group ${pgid} did not exit in time`);
+  let leaderTimer;
+  try {
+    await Promise.race([
+      exited,
+      new Promise((_, reject) => {
+        leaderTimer = setTimeout(() => reject(timedOut()), timeoutMs);
+      }),
+    ]);
+  } finally {
+    clearTimeout(leaderTimer);
+  }
   while (processGroupAlive(pgid)) {
-    if (Date.now() > deadline) throw new Error(`Chrome process group ${pgid} did not exit in time`);
+    if (Date.now() > deadline) throw timedOut();
     await new Promise((resolve) => setTimeout(resolve, 20));
   }
 }
